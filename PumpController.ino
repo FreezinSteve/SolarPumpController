@@ -175,7 +175,7 @@ void loop() {
 
     checkBattery();
   }
-  if (millis() > nextLogTime)
+  if (millis() >= nextLogTime)
   {
     loadDataArray();
     pushToNeon();
@@ -191,12 +191,9 @@ void loop() {
 //=========================================================================
 void setNextLogTime()
 {
-  int secHr = minute() * 60000 + second() * 1000;     // milliseconds into the hour
-  int rem = secHr % LOG_PERIOD;
-  int offset = LOG_PERIOD - rem;
-  DEBUG.print("\r#Sync in %d seconds\n");
-  DEBUG.println(offset / 1000);
-  //return millis() + offset;
+  long secs = millis() / 1000;
+  long currInterval = (secs % LOG_PERIOD) * LOG_PERIOD;
+  nextLogTime = (currInterval + LOG_PERIOD) * 1000;
 }
 
 void readBattery()
@@ -336,8 +333,8 @@ void restartInverter()
 void loadDataArray()
 {
   // Battery to 0, state to 1
-  strcpy(mNeonData[0], "25.000");
-  strcpy(mNeonData[1], "1");
+  sprintf(mNeonData[0], "%.2f", battery);
+  sprintf(mNeonData[1], "%d", batteryState);
 }
 
 //=========================================================================
