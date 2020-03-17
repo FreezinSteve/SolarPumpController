@@ -146,9 +146,9 @@ void setup() {
   Serial.begin(9600);
   // Debug via Tx only UART on GPIO2 (D4).
   Serial1.begin(9600);
-
+  DEBUG.println("");
   // Test / auto / manual switch
-  pinMode(PIN_TEST_FAILOVER, INPUT);
+  pinMode(PIN_TEST_FAILOVER, INPUT_PULLUP);
 
   // Start WiFi
   connectWifi();
@@ -176,6 +176,8 @@ void loop() {
 
     checkBattery();
   }
+  DEBUG.print("Seconds till Neon Push: ");
+  DEBUG.println((nextLogTime - millis()) / 1000);
   if (millis() >= nextLogTime)
   {
     loadDataArray();
@@ -192,9 +194,11 @@ void loop() {
 //=========================================================================
 void setNextLogTime()
 {
-  long secs = millis() / 1000;
-  long currInterval = (secs % LOG_PERIOD) * LOG_PERIOD;
-  nextLogTime = (currInterval + LOG_PERIOD) * 1000;
+  int secs = minute() * 60 + second();  
+  int secsIntoInterval = (secs % LOG_PERIOD);
+  DEBUG.print("Seconds into interval: ");
+  DEBUG.println(secsIntoInterval);
+  nextLogTime = millis() + (LOG_PERIOD - secsIntoInterval) * 1000;
 }
 
 void readBattery()
@@ -219,7 +223,7 @@ void readBattery()
   DEBUG.println("V");
 
   int test_failover = digitalRead(PIN_TEST_FAILOVER);
-  if (test_failover == 1)
+  if (test_failover == 0)   // Pull low to test
   {
     DEBUG.println("Testing failover...");
     battery = BATT_LOW_VOLTS - 1;
@@ -348,30 +352,41 @@ bool connectWifi() {
   }
 
   // Connect to Wifi.
-  Serial1.println();
-  Serial1.println();
-  Serial1.print("Connecting to ");
-  Serial1.println(ssid);
-
   WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid, password);
 
-  unsigned long wifiConnectStart = millis();
-
-  while (WiFi.status() != WL_CONNECTED) {
-    // Check to see if
-    if (WiFi.status() == WL_CONNECT_FAILED) {
-      DEBUG.println("Failed to connect to WiFi. Please verify credentials: ");
-      delay(10000);
+  for (int retry = 0; retry < 2; retry++)
+  {
+    DEBUG.print("Connecting to: ");
+    if (retry == 0)
+    {
+      WiFi.begin(ssid, password);
+      DEBUG.print(ssid);
     }
-
-    delay(500);
-    DEBUG.println("...");
-    // Only try for 5 seconds.
-    if (millis() - wifiConnectStart > 15000) {
-      DEBUG.println("Failed to connect to WiFi");
-      return false;
+    else
+    {
+      WiFi.begin(backup_ssid, backup_password);
+      DEBUG.print(backup_ssid);
     }
+    unsigned long wifiConnectStart = millis();
+    while (WiFi.status() != WL_CONNECTED) {
+      // Check to see if
+      if (WiFi.status() == WL_CONNECT_FAILED) {
+        DEBUG.println("connection failed...");
+        delay(1000);
+        break;
+      }
+      delay(500);
+      DEBUG.println("...");
+      // Only try for 'n' seconds.
+      if (millis() - wifiConnectStart > 15000) {
+        DEBUG.println("connection timed out...");
+        break;
+      }
+    }
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    DEBUG.println("failed to connect to WiFi");
+    return false;
   }
 
   DEBUG.println("");
@@ -448,7 +463,7 @@ time_t getNtpTime()
 }
 
 // send an NTP request to the time server at the given address
-void sendNTPpacket(IPAddress & address, WiFiUDP &Udp )
+void sendNTPpacket(IPAddress & address, WiFiUDP & Udp )
 {
   // set all bytes in the buffer to 0
   memset(packetBuffer, 0, NTP_PACKET_SIZE);
@@ -610,7 +625,7 @@ int pushToNeon()
   }
 }
 
-int getSessionToken(RestClient &client, char* sessionHeader)
+int getSessionToken(RestClient & client, char* sessionHeader)
 {
   DynamicJsonBuffer sendJsonBuffer;
   JsonObject& cred = sendJsonBuffer.createObject();
@@ -633,7 +648,7 @@ int getSessionToken(RestClient &client, char* sessionHeader)
   return statusCode;
 }
 
-int pushData(RestClient &client, char* sessionHeader)
+int pushData(RestClient & client, char* sessionHeader)
 {
   DynamicJsonBuffer jsonBuffer;
 
