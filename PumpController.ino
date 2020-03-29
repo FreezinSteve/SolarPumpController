@@ -26,7 +26,6 @@
 // We need to support:
 // NTP time
 // No need for low power mode, wifi always on
-// OTA Updates
 //
 // Use modbus control board
 //
@@ -53,8 +52,8 @@
 // IN6
 // IN7
 // OUT0 - Inverter ON
-// OUT1 - Inverter mains enable
-// OUT2 - Backup mains enable
+// OUT1 - ON = Solar, OFF = Mains
+// OUT2 - Isolate load (load disconnected before switching source)
 // OUT3 -
 // OUT4 -
 // OUT5 -
@@ -67,10 +66,10 @@
 #include "credentials.h"
 //const char* ssid     = "xxxx";
 //const char* password = "xxxx";
-IPAddress staticIP(192, 168, 1, 71);
-IPAddress gateway(192, 168, 1, 250);
-IPAddress subnet(255, 255, 255, 0);
-IPAddress dns(8, 8, 8, 8);  //DNS
+//IPAddress staticIP(192, 168, 1, 71);
+//IPAddress gateway(192, 168, 1, 250);
+//IPAddress subnet(255, 255, 255, 0);
+//IPAddress dns(8, 8, 8, 8);  //DNS
 //================================================================
 // Neon REST Service
 #include "RestClient.h"
@@ -102,11 +101,6 @@ const int timeZone = 0;     // UTC
 const unsigned int localPort = 8888;  // local port to listen for UDP packets
 const int NTP_PACKET_SIZE = 48; // NTP time is in the first 48 bytes of message
 byte packetBuffer[NTP_PACKET_SIZE]; //buffer to hold incoming & outgoing packets
-//================================================================
-// OTA
-#include <WiFiUdp.h>
-#include <ArduinoOTA.h>
-//=========================================================================
 
 int relayInit = 0;
 const int analogSamples = 50;
@@ -122,8 +116,8 @@ byte in7 = 0;
 
 byte out[] = {0, 0, 0, 0, 0, 0, 0, 0};
 const int RELAY_INVERTER = 0;
-const int RELAY_SOLAR = 1;
-const int RELAY_MAINS = 2;
+const int RELAY_SOURCE = 1;
+const int RELAY_ISOLATE = 2;
 
 byte inverterTimer = 0;
 const int OFF_DELAY = 30;   // Keep inverter ON for 30 seconds after use
@@ -134,7 +128,8 @@ const int BATT_STATE_INIT = 0;
 const int BATT_STATE_LOW = 1;
 const int BATT_STATE_OK = 2;
 int batteryState = BATT_STATE_LOW;
-
+float battAvgTotal = 0;
+int battAvgCount = 0;
 const int PIN_TEST_FAILOVER = D2;
 
 // Debug output via Serial1
@@ -150,18 +145,19 @@ void setup() {
   // Test / auto / manual switch
   pinMode(PIN_TEST_FAILOVER, INPUT_PULLUP);
 
-  // Start WiFi
-  connectWifi();
-  // Init OTA for over the air updates
-  initOTA();
+  startWiFi();
+
   // Init NTP and time
   initTime();
+
   // init relay module to all off
   initRelays();
   // Delay for when we're reprogramming it
   delay(2000);
 
   setNextLogTime();
+
+  stopWiFi();
 }
 
 void loop() {
@@ -180,9 +176,18 @@ void loop() {
   DEBUG.println((nextLogTime - millis()) / 1000);
   if (millis() >= nextLogTime)
   {
-    loadDataArray();
-    pushToNeon();
+    if (startWiFi())
+    {
+      loadDataArray();
+      pushToNeon();
+      stopWiFi();
+    }
+    else
+    {
+      DEBUG.println("WiFi failed, data push missed");
+    }
     setNextLogTime();
+    stopWiFi();
   }
 
   DEBUG.println("");
@@ -194,7 +199,7 @@ void loop() {
 //=========================================================================
 void setNextLogTime()
 {
-  int secs = minute() * 60 + second();  
+  int secs = minute() * 60 + second();
   int secsIntoInterval = (secs % LOG_PERIOD);
   DEBUG.print("Seconds into interval: ");
   DEBUG.println(secsIntoInterval);
@@ -216,6 +221,10 @@ void readBattery()
   // 0-1024bits
   int battmV = map(rawBits, 0, 914, 0, 31600);
   battery = (float)battmV / 1000;
+  // Update totals for averaging
+  battAvgTotal += battery;
+  battAvgCount ++;
+
   DEBUG.print("A0: ");
   DEBUG.print(rawBits);
   DEBUG.print("bits,  Battery: ");
@@ -299,52 +308,143 @@ void readModuleInputs()
 // Perform a staged safe shutdown
 void shutdownInverter()
 {
-  out[RELAY_INVERTER] = 0;
-  out[RELAY_SOLAR] = 0;
-  out[RELAY_MAINS] = 1;
-
-  DEBUG.println("Isolating inverter");
-  SetRelayState(RELAY_SOLAR, out[RELAY_SOLAR]);
-  delay(1000);
+  DEBUG.println("Isolating load");
+  SetRelayState(RELAY_ISOLATE, 1);
+  delay(500);
 
   DEBUG.println("Shutting down inverter");
-  SetRelayState(RELAY_INVERTER, out[RELAY_INVERTER]);
-  delay(1000);
+  SetRelayState(RELAY_INVERTER, 0);
+  delay(500);
 
   DEBUG.println("Switching to mains");
-  SetRelayState(RELAY_MAINS, out[RELAY_MAINS]);
-  delay(100);
+  SetRelayState(RELAY_SOURCE, 0);
+  delay(500);
+
+  DEBUG.println("Reconnecting load");
+  SetRelayState(RELAY_ISOLATE, 0);
+  delay(500);
+
+  // Final state
+  out[RELAY_INVERTER] = 0;
+  out[RELAY_SOURCE] = 0;
+  out[RELAY_ISOLATE] = 0;
 }
 
 void restartInverter()
 {
-  out[RELAY_INVERTER] = 1;
-  out[RELAY_SOLAR] = 1;
-  out[RELAY_MAINS] = 0;
-
-  DEBUG.println("Isolating mains");
-  SetRelayState(RELAY_MAINS, out[RELAY_MAINS]);
-  delay(1000);
+  DEBUG.println("Isolating load");
+  SetRelayState(RELAY_ISOLATE, 1);
+  delay(500);
 
   DEBUG.println("Switching to inverter");
-  SetRelayState(RELAY_SOLAR, out[RELAY_SOLAR]);
-  delay(1000);
+  SetRelayState(RELAY_SOURCE, 1);
+  delay(500);
 
   DEBUG.println("Starting inverter");
-  SetRelayState(RELAY_INVERTER, out[RELAY_INVERTER]);
-  delay(100);
+  SetRelayState(RELAY_INVERTER, 1);
+  delay(500);
+
+  DEBUG.println("Reconnecting load");
+  SetRelayState(RELAY_ISOLATE, 0);
+  delay(500);
+
+  // Final atate
+  out[RELAY_INVERTER] = 1;
+  out[RELAY_SOURCE] = 1;
+  out[RELAY_ISOLATE] = 0;
 }
 
 void loadDataArray()
 {
+  // calculate mean battery voltage for storage
+  float avgBatt = battAvgTotal / battAvgCount;
+  battAvgTotal = 0;
+  battAvgCount = 0;
+
   // Battery to 0, state to 1
-  sprintf(mNeonData[0], "%.2f", battery);
+  sprintf(mNeonData[0], "%.2f", avgBatt);
   sprintf(mNeonData[1], "%d", batteryState);
 }
 
 //=========================================================================
 // Wifi routines
 //=========================================================================
+bool startWiFi()
+{
+  // Wake up WiFi and connnect
+  WiFi.forceSleepWake();
+  DEBUG.println("WiFi awake");
+  delay( 1 );
+  if (WiFi.status() == WL_CONNECTED) {
+    return true;
+  }
+
+  // Connect to Wifi.
+  WiFi.mode(WIFI_STA);
+
+  for (int retry = 0; retry < 2; retry++)
+  {
+    DEBUG.print("Connecting to: ");
+    if (retry == 0)
+    {
+      WiFi.begin(ssid, password);
+      DEBUG.print(ssid);
+    }
+    else
+    {
+      WiFi.begin(backup_ssid, backup_password);
+      DEBUG.print(backup_ssid);
+    }
+    unsigned long wifiConnectStart = millis();
+    while (true) {
+      // Check to see if
+      if (WiFi.status() == WL_CONNECT_FAILED) {
+        DEBUG.println("connection failed...");
+        delay(1000);
+        break;
+      }
+      else if (WiFi.status() == WL_CONNECTED)
+      {
+        break;
+      }
+      delay(500);
+      DEBUG.println("...");
+      // Only try for 'n' seconds.
+      if (millis() - wifiConnectStart > 15000) {
+        DEBUG.println("connection timed out...");
+        break;
+      }
+    }
+    if (WiFi.status() == WL_CONNECTED)
+    {
+      break;
+    }
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    DEBUG.println("failed to connect to WiFi");
+    return false;
+  }
+
+  DEBUG.println("");
+  DEBUG.println("WiFi connected");
+  DEBUG.println("IP address: ");
+  DEBUG.println(WiFi.localIP());
+  DEBUG.println();
+  DEBUG.println("Connected!");
+  DEBUG.printf("RSSI: %d dBm\n", WiFi.RSSI());
+  return true;
+
+}
+
+void stopWiFi()
+{
+  // Power down wifi
+  WiFi.mode( WIFI_OFF );
+  WiFi.forceSleepBegin();
+  delay( 1 );
+  DEBUG.println("WiFi power down");
+}
+
 bool connectWifi() {
 
   if (WiFi.status() == WL_CONNECTED) {
@@ -397,32 +497,6 @@ bool connectWifi() {
   DEBUG.println("Connected!");
   DEBUG.printf("RSSI: %d dBm\n", WiFi.RSSI());
   return true;
-}
-
-//=========================================================================
-// OTA Routines
-//=========================================================================
-void initOTA()
-{
-  // Port defaults to 8266
-  ArduinoOTA.setPort(8266);
-
-  // Hostname defaults to esp8266-[ChipID]
-  ArduinoOTA.setHostname("pump_controller");
-
-  ArduinoOTA.onStart([]() {
-    // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
-  });
-  ArduinoOTA.onEnd([]() {
-    //
-  });
-  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-    //
-  });
-  ArduinoOTA.onError([](ota_error_t error) {
-    //
-  });
-  ArduinoOTA.begin();
 }
 
 //==============================================================================
