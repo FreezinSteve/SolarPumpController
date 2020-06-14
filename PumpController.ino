@@ -31,9 +31,9 @@
 //
 // A0 - Solar battery
 // D0
-// D1
-// D2 - Test failover switch (or Auto / Mains selection switch)
-// D3
+// D1 (I2C SCL)
+// D2 (I2C SDA)
+// D3 (GPIO0) - Test failover switch (or Auto / Mains selection switch)
 // D4 (GPIO2) - Debug output (TX only UART1)
 // D5
 // D6
@@ -54,9 +54,9 @@
 // OUT0 - Inverter ON
 // OUT1 - ON = Solar, OFF = Mains
 // OUT2 - Isolate load (load disconnected before switching source)
-// OUT3 -
-// OUT4 -
-// OUT5 -
+// OUT3 - Red LED (on MAINS)
+// OUT4 - Green LED = On solar
+// OUT5 - Green LED = Charger on
 // OUT6 -
 // OUT7 -
 
@@ -88,7 +88,7 @@ const int LOG_PERIOD = 900;   // 900 second / 15 minute push rate
 
 // Save battery and state
 const byte NEON_CHAN_LEN = 8;      // No channels should be > than this length 'xxx.xx\0'
-const byte NEON_CHAN_COUNT = 2;
+const byte NEON_CHAN_COUNT = 3;
 char mNeonData[NEON_CHAN_COUNT][NEON_CHAN_LEN];
 long nextLogTime = 0;
 //================================================================
@@ -118,19 +118,22 @@ byte out[] = {0, 0, 0, 0, 0, 0, 0, 0};
 const int RELAY_INVERTER = 0;
 const int RELAY_SOURCE = 1;
 const int RELAY_ISOLATE = 2;
-
+const int RELAY_MAINS_LED = 3;
+const int RELAY_SOLAR_LED = 4;
+const int RELAY_CHARGE_LED = 5;
 byte inverterTimer = 0;
 const int OFF_DELAY = 30;   // Keep inverter ON for 30 seconds after use
 
-const float BATT_LOW_VOLTS = 20.0;    // Trip out if battery drops below this
-const float BATT_OK_VOLTS = 26.0;     // Resume battery operation when voltage rises above this
+const float BATT_LOW_VOLTS = 23.5;    // Trip out if battery drops below this
+const float BATT_OK_VOLTS = 27.5;     // Resume battery operation when voltage rises above this
 const int BATT_STATE_INIT = 0;
 const int BATT_STATE_LOW = 1;
 const int BATT_STATE_OK = 2;
-int batteryState = BATT_STATE_LOW;
+int batteryState = BATT_STATE_INIT;
+float battMin = 30;
 float battAvgTotal = 0;
 int battAvgCount = 0;
-const int PIN_TEST_FAILOVER = D2;
+const int PIN_TEST_FAILOVER = D3;
 
 // Debug output via Serial1
 #define DEBUG Serial1
@@ -169,7 +172,6 @@ void loop() {
   if (relayInit > 0)
   {
     readModuleInputs();
-
     checkBattery();
   }
   DEBUG.print("Seconds till Neon Push: ");
@@ -224,7 +226,12 @@ void readBattery()
   // Update totals for averaging
   battAvgTotal += battery;
   battAvgCount ++;
-
+  // Capture minimum 
+  if (battMin > battery)
+  {
+    battMin = battery;
+  }
+  
   DEBUG.print("A0: ");
   DEBUG.print(rawBits);
   DEBUG.print("bits,  Battery: ");
@@ -324,6 +331,10 @@ void shutdownInverter()
   SetRelayState(RELAY_ISOLATE, 0);
   delay(500);
 
+  SetRelayState(RELAY_MAINS_LED, 1);
+  delay(100);
+  SetRelayState(RELAY_SOLAR_LED, 0);
+  
   // Final state
   out[RELAY_INVERTER] = 0;
   out[RELAY_SOURCE] = 0;
@@ -348,6 +359,10 @@ void restartInverter()
   SetRelayState(RELAY_ISOLATE, 0);
   delay(500);
 
+  SetRelayState(RELAY_MAINS_LED, 0);
+  delay(100);
+  SetRelayState(RELAY_SOLAR_LED, 1);
+
   // Final atate
   out[RELAY_INVERTER] = 1;
   out[RELAY_SOURCE] = 1;
@@ -360,10 +375,13 @@ void loadDataArray()
   float avgBatt = battAvgTotal / battAvgCount;
   battAvgTotal = 0;
   battAvgCount = 0;
-
+    
   // Battery to 0, state to 1
   sprintf(mNeonData[0], "%.2f", avgBatt);
   sprintf(mNeonData[1], "%d", batteryState);
+  sprintf(mNeonData[2], "%.2f", battMin);
+
+  battMin = 30;
 }
 
 //=========================================================================
@@ -376,6 +394,7 @@ bool startWiFi()
   DEBUG.println("WiFi awake");
   delay( 1 );
   if (WiFi.status() == WL_CONNECTED) {
+    flashConnect();
     return true;
   }
 
@@ -422,6 +441,8 @@ bool startWiFi()
   }
   if (WiFi.status() != WL_CONNECTED) {
     DEBUG.println("failed to connect to WiFi");
+    //Flash RED LED
+    flashFailConnect();
     return false;
   }
 
@@ -432,6 +453,7 @@ bool startWiFi()
   DEBUG.println();
   DEBUG.println("Connected!");
   DEBUG.printf("RSSI: %d dBm\n", WiFi.RSSI());
+  flashConnect();
   return true;
 
 }
@@ -749,4 +771,40 @@ int pushData(RestClient & client, char* sessionHeader)
   DEBUG.print("#ImportData status code = %d\n");
   DEBUG.println(statusCode);
   return statusCode;
+}
+
+//===============================================================
+// Notification routines
+void flashFailConnect()
+{
+  for(int i=0; i<5; i++)
+  {
+    SetRelayState(RELAY_MAINS_LED, 1);
+    delay(100);
+    SetRelayState(RELAY_MAINS_LED, 0);
+    delay(100);
+  }
+  // Restore state
+  if (batteryState == BATT_STATE_LOW)
+  {
+    SetRelayState(RELAY_MAINS_LED,1);
+  }
+}
+
+//===============================================================
+// Notification routines
+void flashConnect()
+{
+  for(int i=0; i<5; i++)
+  {
+    SetRelayState(RELAY_SOLAR_LED, 1);
+    delay(100);
+    SetRelayState(RELAY_SOLAR_LED, 0);
+    delay(100);
+  }
+    // Restore state
+  if (batteryState == BATT_STATE_OK)
+  {
+    SetRelayState(RELAY_SOLAR_LED,1);
+  }
 }
