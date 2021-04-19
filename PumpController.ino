@@ -102,6 +102,7 @@ const unsigned int localPort = 8888;  // local port to listen for UDP packets
 const int NTP_PACKET_SIZE = 48; // NTP time is in the first 48 bytes of message
 byte packetBuffer[NTP_PACKET_SIZE]; //buffer to hold incoming & outgoing packets
 
+//===========================================================
 int relayInit = 0;
 const int analogSamples = 50;
 float battery = 0;
@@ -121,6 +122,8 @@ const int RELAY_ISOLATE = 2;
 const int RELAY_MAINS_LED = 3;
 const int RELAY_SOLAR_LED = 4;
 const int RELAY_COMMS_LED = 5;
+const int RELAY_FAN = 6;
+
 byte inverterTimer = 0;
 const int OFF_DELAY = 30;   // Keep inverter ON for 30 seconds after use
 
@@ -130,15 +133,26 @@ const int BATT_STATE_INIT = 0;
 const int BATT_STATE_LOW = 1;
 const int BATT_STATE_OK = 2;
 int batteryState = BATT_STATE_INIT;
-float battMin = 30;
-float battAvgTotal = 0;
+float battMin = 30;       // minimum measured battery for this log interval
+float battAvgTotal = 0;   // Accumulator for battery mean
 int battAvgCount = 0;
-int chargeTimer = 0;
+int chargeTimer = 0;      // Countdown timer to delay switch from mains to solar
 const int CHARGE_TIME = 300;        // Leave switched to mains for at least 300 seconds before switching back to solar. This allows time for the battery to charge without excessive switching
 const int PIN_TEST_FAILOVER = D3;
-
 // Debug output via Serial1
 #define DEBUG Serial1
+//================================================================
+// TMP102 temperature monitoring
+#include "Wire.h"
+#define TMP102_I2C_ADDRESS 72 /* This is the I2C address for our chip. This value is correct if you tie the ADD0 pin to ground. See the datasheet for some other values. */
+float cabinetTemp = 0.0;
+int fanState = 0;
+const int FAN_STATE_INIT = 0;
+const int FAN_STATE_OFF = 1;
+const int FAN_STATE_ON = 2;
+const float TEMP_FAN_ON = 30.0;
+const float TEMP_FAN_OFF = 25.0;
+const float TEMP_ERR = 100.0;  // Ignore temperatures above this value (I2C failure?)
 
 void setup() {
 
@@ -149,6 +163,8 @@ void setup() {
   DEBUG.println("");
   // Test / auto / manual switch
   pinMode(PIN_TEST_FAILOVER, INPUT_PULLUP);
+
+  Wire.begin();
 
   startWiFi();
 
@@ -170,12 +186,16 @@ void loop() {
 
   // Read battery voltage
   readBattery();
+  readTMP102();
 
   if (relayInit > 0)
   {
     readModuleInputs();
     checkBattery();
   }
+
+  checkTemperature();
+
   DEBUG.print("Seconds till Neon Push: ");
   DEBUG.println((nextLogTime - millis()) / 1000);
   if (millis() >= nextLogTime)
@@ -301,6 +321,67 @@ void checkBattery()
   }
 }
 
+void readTMP102()
+{
+  /* Reset the register pointer (by default it is ready to read temperatures)
+    You can alter it to a writeable register and alter some of the configuration -
+    the sensor is capable of alerting you if the temperature is above or below a specfied threshold. */
+
+  Wire.beginTransmission(TMP102_I2C_ADDRESS); //Say hi to the sensor.
+  Wire.write(0x00);
+  Wire.endTransmission();
+  Wire.requestFrom(TMP102_I2C_ADDRESS, 2);
+  Wire.endTransmission();
+
+  byte b1 = Wire.read();
+  byte b2 = Wire.read();
+
+  int temp16 = (b1 << 4) | (b2 >> 4);    // builds 12-bit value
+  DEBUG.print("Integer data before conversion: ");
+  DEBUG.println(temp16);
+  cabinetTemp = temp16 * 0.0625;
+  DEBUG.print("Cabinet temperature = ");
+  DEBUG.print(cabinetTemp, 2);
+  DEBUG.println("degC");
+}
+
+void checkTemperature()
+{
+  if (fanState == FAN_STATE_INIT)
+  {
+    // OFF on first run or error
+    SetRelayState(RELAY_FAN, 0);
+    fanState = FAN_STATE_OFF;
+  }
+  else if (cabinetTemp > TEMP_ERR)
+  {
+    if (fanState != FAN_STATE_ON)
+    {
+      SetRelayState(RELAY_FAN, 1);
+      fanState = FAN_STATE_ON;
+    }
+  }
+  else if (fanState == FAN_STATE_OFF)
+  {
+    if (cabinetTemp > TEMP_FAN_ON)
+    {
+      if (fanState != FAN_STATE_ON)
+      {
+        SetRelayState(RELAY_FAN, 1);
+        fanState = FAN_STATE_ON;
+      }
+    }
+  }
+  else if (cabinetTemp  < TEMP_FAN_OFF)
+  {
+    if (fanState != FAN_STATE_OFF)
+    {
+      SetRelayState(RELAY_FAN, 0);
+      fanState = FAN_STATE_OFF;
+    }
+  }
+}
+
 void readModuleInputs()
 {
   int state = GetInputStates();
@@ -374,7 +455,7 @@ void restartInverter()
   delay(100);
   SetRelayState(RELAY_SOLAR_LED, 1);
 
-  // Final atate
+  // Final state
   out[RELAY_INVERTER] = 1;
   out[RELAY_SOURCE] = 1;
   out[RELAY_ISOLATE] = 0;
@@ -791,24 +872,15 @@ int pushData(RestClient & client, char* sessionHeader)
 void flashFailConnect()
 {
   // quick flashes
-  for (int i = 0; i < 2; i++)
+  for (int i = 0; i < 4; i++)
   {
     SetRelayState(RELAY_COMMS_LED, 1);
     delay(250);
     SetRelayState(RELAY_COMMS_LED, 0);
     delay(250);
-    SetRelayState(RELAY_COMMS_LED, 1);
-    delay(250);
-    SetRelayState(RELAY_COMMS_LED, 0);
-    delay(250);
-    SetRelayState(RELAY_COMMS_LED, 1);
-    delay(250);
-    SetRelayState(RELAY_COMMS_LED, 0);
   }
 }
 
-//===============================================================
-// Notification routines
 void flashConnect()
 {
   // 1 long flash
@@ -817,5 +889,6 @@ void flashConnect()
     SetRelayState(RELAY_COMMS_LED, 1);
     delay(1000);
     SetRelayState(RELAY_COMMS_LED, 0);
+    delay(500);
   }
 }
