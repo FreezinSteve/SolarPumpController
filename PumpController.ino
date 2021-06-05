@@ -54,11 +54,11 @@
 // OUT0 - Inverter ON
 // OUT1 - ON = Solar, OFF = Mains
 // OUT2 - Isolate load (load disconnected before switching source)
-// OUT3 - Red LED = On MAINS + Charger ON
-// OUT4 - Green LED = On solar
+// OUT3 - Red LED = On MAINS
+// OUT4 - Green LED = On SOLAR
 // OUT5 - Green LED = Comms state
-// OUT6 -
-// OUT7 -
+// OUT6 - Cooling fan
+// OUT7 - MAINS Charger
 
 //=========================================================================
 // WiFi
@@ -123,21 +123,27 @@ const int RELAY_MAINS_LED = 3;
 const int RELAY_SOLAR_LED = 4;
 const int RELAY_COMMS_LED = 5;
 const int RELAY_FAN = 6;
-
-byte inverterTimer = 0;
-const int OFF_DELAY = 30;   // Keep inverter ON for 30 seconds after use
+const int RELAY_CHARGER = 7;
 
 const float BATT_LOW_VOLTS = 23.5;    // Trip out if battery drops below this
 const float BATT_OK_VOLTS = 28.0;     // Resume battery operation when voltage rises above this
+const float MAIN_CHARGE_START = 24.0;  // Start mains charger below this
 const int BATT_STATE_INIT = 0;
 const int BATT_STATE_LOW = 1;
 const int BATT_STATE_OK = 2;
+const int CHARGE_STATE_INIT = 0;
+const int CHARGE_STATE_ON = 1;
+const int CHARGE_STATE_OFF = 2;
+
 int batteryState = BATT_STATE_INIT;
+int chargerState = CHARGE_STATE_INIT;
 float battMin = 30;       // minimum measured battery for this log interval
 float battAvgTotal = 0;   // Accumulator for battery mean
 int battAvgCount = 0;
-int chargeTimer = 0;      // Countdown timer to delay switch from mains to solar
-const int CHARGE_TIME = 300;        // Leave switched to mains for at least 300 seconds before switching back to solar. This allows time for the battery to charge without excessive switching
+int switchDelayTimer = 0;           // Countdown timer to delay switch from mains to solar
+int chargeDelayTimer = 0;           // Countdown timer to delay mains charger from switching off
+const int DELAY_TIME = 300;        // Leave switched to mains for at least 300 seconds before switching back to solar. This allows time for the battery to charge without excessive switching
+const int CHARGE_TIME = 300;      // Leave mains charger on for at lease 300 seconds
 const int PIN_TEST_FAILOVER = D3;
 // Debug output via Serial1
 #define DEBUG Serial1
@@ -152,7 +158,6 @@ const int FAN_STATE_OFF = 1;
 const int FAN_STATE_ON = 2;
 const float TEMP_FAN_ON = 30.0;
 const float TEMP_FAN_OFF = 25.0;
-const float TEMP_ERR = 100.0;  // Ignore temperatures above this value (I2C failure?)
 
 void setup() {
 
@@ -195,6 +200,7 @@ void loop() {
   }
 
   checkTemperature();
+  checkCharger();
 
   DEBUG.print("Seconds till Neon Push: ");
   DEBUG.println((nextLogTime - millis()) / 1000);
@@ -293,7 +299,7 @@ void checkBattery()
     if (battery < BATT_LOW_VOLTS)
     {
       batteryState = BATT_STATE_LOW;
-      chargeTimer = CHARGE_TIME;
+      switchDelayTimer = DELAY_TIME;
       shutdownInverter();
     }
     else
@@ -303,11 +309,11 @@ void checkBattery()
   }
   else    // BATT_STATE_LOW
   {
-    if (chargeTimer > 0)
+    if (switchDelayTimer > 0)
     {
-      chargeTimer--;
-      DEBUG.print("Battery LOW, waiting for charge timer to expire:");
-      DEBUG.println(chargeTimer);
+      switchDelayTimer--;
+      DEBUG.print("Battery LOW, waiting for switch timer to expire:");
+      DEBUG.println(switchDelayTimer);
     }
     else if (battery > BATT_OK_VOLTS)
     {
@@ -353,14 +359,6 @@ void checkTemperature()
     SetRelayState(RELAY_FAN, 0);
     fanState = FAN_STATE_OFF;
   }
-  else if (cabinetTemp > TEMP_ERR)
-  {
-    if (fanState != FAN_STATE_ON)
-    {
-      SetRelayState(RELAY_FAN, 1);
-      fanState = FAN_STATE_ON;
-    }
-  }
   else if (fanState == FAN_STATE_OFF)
   {
     if (cabinetTemp > TEMP_FAN_ON)
@@ -372,12 +370,72 @@ void checkTemperature()
       }
     }
   }
-  else if (cabinetTemp  < TEMP_FAN_OFF)
+  else
   {
-    if (fanState != FAN_STATE_OFF)
+    if (cabinetTemp < TEMP_FAN_OFF)
     {
-      SetRelayState(RELAY_FAN, 0);
-      fanState = FAN_STATE_OFF;
+      if (fanState != FAN_STATE_OFF)
+      {
+        SetRelayState(RELAY_FAN, 0);
+        fanState = FAN_STATE_OFF;
+      }
+    }
+  }
+}
+
+void checkCharger()
+{
+  // Check to see if we should turn on the mains charger
+  int hr = hour() + 12;   // UTC OFFSET
+  if (hr > 24) {
+    hr -= 24;
+  }
+  if (hr >= 20 || hr < 6)
+  {
+    // 8pm to 6am mains charger on
+    if (chargerState != CHARGE_STATE_ON)
+    {
+      SetRelayState(RELAY_CHARGER, 1);
+      chargerState = CHARGE_STATE_ON;
+      chargeDelayTimer = 0;
+      DEBUG.println("Night time, starting mains charger");
+    }
+  }
+  else
+  {
+    if (chargeDelayTimer == 0)
+    {
+      // Turn on for "n" seconds if battery drops below BATT_MAIN_CHARGE
+      if (battery < MAIN_CHARGE_START)
+      {
+        if (chargerState == CHARGE_STATE_OFF)
+        {
+          DEBUG.println("Batt low, starting mains charger");
+          SetRelayState(RELAY_CHARGER, 1);
+          chargerState = CHARGE_STATE_ON;
+          chargeDelayTimer = CHARGE_TIME;
+        }
+      }
+    }
+    else
+    {
+      if (battery < MAIN_CHARGE_START)
+      {
+        // Still low
+        chargeDelayTimer = CHARGE_TIME;
+      }
+      else
+      {
+        chargeDelayTimer--;
+        DEBUG.print("Mains charger delay timer = ");
+        DEBUG.print(chargeDelayTimer);
+        if (chargeDelayTimer == 0)
+        {
+          SetRelayState(RELAY_CHARGER, 0);
+          chargerState = CHARGE_STATE_OFF;
+          DEBUG.println("Battery recovered, timer expired, stopping mains charger");
+        }
+      }
     }
   }
 }
@@ -545,7 +603,6 @@ bool startWiFi()
   DEBUG.println();
   DEBUG.println("Connected!");
   DEBUG.printf("RSSI: %d dBm\n", WiFi.RSSI());
-
 
   flashConnect();
   return true;
