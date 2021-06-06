@@ -386,13 +386,17 @@ void checkTemperature()
 void checkCharger()
 {
   // Check to see if we should turn on the mains charger
+  // When the solar control is integrated, we can switch on if the solar current is < 'x' for 'y' seconds
+  // instead of baseing it on time of day or battery state
+
   int hr = hour() + 12;   // UTC OFFSET
   if (hr > 24) {
     hr -= 24;
   }
+
   if (hr >= 20 || hr < 6)
   {
-    // 8pm to 6am mains charger on
+    // 8pm to 6am mains charger always on
     if (chargerState != CHARGE_STATE_ON)
     {
       SetRelayState(RELAY_CHARGER, 1);
@@ -401,42 +405,44 @@ void checkCharger()
       DEBUG.println("Night time, starting mains charger");
     }
   }
-  else
+  else if (batteryState == BATT_STATE_LOW)
   {
-    if (chargeDelayTimer == 0)
+    // Still in LOW state, keep charger on
+    if (chargerState != CHARGE_STATE_ON)
     {
-      // Turn on for "n" seconds if battery drops below BATT_MAIN_CHARGE
-      if (battery < MAIN_CHARGE_START)
+      SetRelayState(RELAY_CHARGER, 1);
+      chargerState = CHARGE_STATE_ON;
+      chargeDelayTimer = 0;
+      DEBUG.println("In MAINS mode, starting mains charger");
+    }
+  }
+  else if (chargeDelayTimer == 0)
+  {
+    // Turn on for "n" seconds if battery drops below BATT_MAIN_CHARGE
+    if (battery < MAIN_CHARGE_START)
+    {
+      if (chargerState != CHARGE_STATE_ON)
       {
-        if (chargerState == CHARGE_STATE_OFF)
-        {
-          DEBUG.println("Batt low, starting mains charger");
-          SetRelayState(RELAY_CHARGER, 1);
-          chargerState = CHARGE_STATE_ON;
-          chargeDelayTimer = CHARGE_TIME;
-        }
+        SetRelayState(RELAY_CHARGER, 1);
+        chargerState = CHARGE_STATE_ON;
+        chargeDelayTimer = CHARGE_TIME;
+        DEBUG.println("Batt low, starting mains charger");
       }
     }
     else
     {
-      if (battery < MAIN_CHARGE_START)
+      // not night, not in LOW state, timer expired, switch off
+      if (chargerState != CHARGE_STATE_OFF)
       {
-        // Still low
-        chargeDelayTimer = CHARGE_TIME;
-      }
-      else
-      {
-        chargeDelayTimer--;
-        DEBUG.print("Mains charger delay timer = ");
-        DEBUG.print(chargeDelayTimer);
-        if (chargeDelayTimer == 0)
-        {
-          SetRelayState(RELAY_CHARGER, 0);
-          chargerState = CHARGE_STATE_OFF;
-          DEBUG.println("Battery recovered, timer expired, stopping mains charger");
-        }
+        SetRelayState(RELAY_CHARGER, 0);
+        chargerState = CHARGE_STATE_OFF;
+        DEBUG.println("Charge timer expired, turning off charger");
       }
     }
+  }
+  else
+  {
+    chargeDelayTimer--;
   }
 }
 
