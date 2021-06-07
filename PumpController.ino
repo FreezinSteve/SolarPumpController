@@ -56,7 +56,7 @@
 // OUT2 - Isolate load (load disconnected before switching source)
 // OUT3 - Red LED = On MAINS
 // OUT4 - Green LED = On SOLAR
-// OUT5 - Green LED = Comms state
+// OUT5 - Green LED = Comms status
 // OUT6 - Cooling fan
 // OUT7 - MAINS Charger
 
@@ -399,7 +399,7 @@ void checkCharger()
     // 8pm to 6am mains charger always on
     if (chargerState != CHARGE_STATE_ON)
     {
-      SetRelayState(RELAY_CHARGER, 1);
+      SetRelayState(RELAY_CHARGER, 1);-
       chargerState = CHARGE_STATE_ON;
       chargeDelayTimer = 0;
       DEBUG.println("Night time, starting mains charger");
@@ -412,7 +412,7 @@ void checkCharger()
     {
       SetRelayState(RELAY_CHARGER, 1);
       chargerState = CHARGE_STATE_ON;
-      chargeDelayTimer = 0;
+      chargeDelayTimer = CHARGE_TIME;
       DEBUG.println("In MAINS mode, starting mains charger");
     }
   }
@@ -443,6 +443,8 @@ void checkCharger()
   else
   {
     chargeDelayTimer--;
+    DEBUG.print("Charge delay timer = ");
+    DEBUG.println(chargeDelayTimer);
   }
 }
 
