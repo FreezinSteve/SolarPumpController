@@ -399,7 +399,7 @@ void checkCharger()
     // 8pm to 6am mains charger always on
     if (chargerState != CHARGE_STATE_ON)
     {
-      SetRelayState(RELAY_CHARGER, 1);-
+      SetRelayState(RELAY_CHARGER, 1);
       chargerState = CHARGE_STATE_ON;
       chargeDelayTimer = 0;
       DEBUG.println("Night time, starting mains charger");
@@ -534,9 +534,15 @@ void loadDataArray()
   battAvgTotal = 0;
   battAvgCount = 0;
 
+  int state = batteryState;
+  if (chargerState == CHARGE_STATE_ON)
+  {
+    state += 2;
+  }
+
   // Battery to 0, state to 1
   sprintf(mNeonData[0], "%.2f", avgBatt);
-  sprintf(mNeonData[1], "%d", batteryState);
+  sprintf(mNeonData[1], "%d", state);
   sprintf(mNeonData[2], "%.2f", battMin);
 
   battMin = 30;
